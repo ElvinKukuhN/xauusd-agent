@@ -217,6 +217,36 @@ if [[ ! -f "${PROJECT_DIR}/.env" ]]; then
 fi
 chmod 600 "${PROJECT_DIR}/.env"
 
+# ---------- 8b. Market API untuk n8n (opsional) ----------
+# Service ini hanya dibutuhkan jika laporan dijalankan dari workflow n8n.
+step "Menulis service systemd xauusd-market-api"
+${SUDO} tee /etc/systemd/system/xauusd-market-api.service >/dev/null <<EOF
+[Unit]
+Description=XAU/USD market API (data MT5 + berita) untuk n8n
+After=network-online.target mt5-terminal.service
+Wants=network-online.target mt5-terminal.service
+
+[Service]
+User=${RUN_USER}
+WorkingDirectory=${PROJECT_DIR}
+Environment=HOME=${RUN_HOME}
+ExecStart=${PYTHON_BIN} -m tools.market_api
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+${SUDO} systemctl daemon-reload
+if grep -Eq '^MARKET_API_TOKEN=.{24,}$' "${PROJECT_DIR}/.env" \
+        && ! grep -q '^MARKET_API_TOKEN=isi_' "${PROJECT_DIR}/.env"; then
+    ${SUDO} systemctl enable xauusd-market-api.service
+    ${SUDO} systemctl restart xauusd-market-api.service
+    echo "Market API aktif. Cek: curl -s http://127.0.0.1:8787/health"
+else
+    echo "MARKET_API_TOKEN belum diisi di .env; service xauusd-market-api belum diaktifkan."
+fi
+
 # ---------- 9. Cronjob ----------
 if [[ "${INSTALL_CRON}" -eq 1 ]]; then
     step "Memasang cronjob"
@@ -258,6 +288,11 @@ cat <<EOF
 ${CRON_LINE}
 
    Catatan: jadwal cron memakai zona waktu VPS (cek: timedatectl).
+
+   Memakai workflow n8n? JANGAN pasang cron ini (laporan akan terkirim dua kali).
+   Sebagai gantinya isi MARKET_API_TOKEN di .env (openssl rand -hex 32), lalu:
+     sudo systemctl enable --now xauusd-market-api
+     curl -s -H "X-API-Key: <token>" http://127.0.0.1:8787/snapshot | head -c 300
 
 6. Perawatan:
      systemctl status mt5-terminal        # status terminal MT5

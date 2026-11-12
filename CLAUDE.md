@@ -46,15 +46,15 @@ Consequences:
 
 ### Request flow
 
-`main.py` → `config.validate()` → `agent.analyst_agent.run_analysis()` → Gemini calls `get_oanda_xauusd_data("H4")`, `get_oanda_xauusd_data("H1")`, `get_macro_news()` → report text → `notifier.telegram_bot.send_telegram_message()`.
+`main.py` → `config.validate()` → `agent.analyst_agent.run_analysis()` → Gemini calls `get_oanda_xauusd_data` for `"H1"` (trend), `"M15"` (setup) and `"M5"` (trigger), plus `get_macro_news()` → report text → `notifier.telegram_bot.send_telegram_message()`. Every Gemini HTTP request is capped by `GEMINI_TIMEOUT` (seconds, min 10 — the API rejects shorter deadlines); a timeout surfaces as a retryable 504.
 
 `run_analysis` rejects a response (and retries, up to 3 attempts) if the model did not actually call both required tools, checked via `automatic_function_calling_history`. On final failure `main.py` sends an error notice to Telegram instead.
 
 ### Contracts that span files
 
 - **Tool functions are the Gemini schema.** The SDK builds function declarations from the signature and docstring of `get_oanda_xauusd_data` and `get_macro_news`. Their names are hard-coded in `agent/prompts.py` and in `REQUIRED_TOOLS` in `agent/analyst_agent.py`. Tools never raise: failures return `{"status": "error", "error": ...}` (or a one-item list with `error` for news) so the model can report them, and the prompt maps any such failure to "WAIT & SEE (NO TRADE)".
-- **Result field names are referenced by the prompt.** `SYSTEM_INSTRUCTION` names `spread_dollars`, `trend_bias`, `risk_levels`, `live_bid`/`live_ask`, `support_24_bars`, etc. Renaming a key in `oanda_client.py` requires updating `agent/prompts.py`.
-- **Trading rules live in two places.** The ATR multipliers (SL 1.5, TP1 1.5, TP2 3.0) are constants in `oanda_client.py` (which precomputes `risk_levels` so the model does not do arithmetic) and are also stated in the prompt. The spread threshold (0.80), RSI extremes (75/25) and the H4+H1+news confluence rule are prompt-only.
+- **Result field names are referenced by the prompt.** `SYSTEM_INSTRUCTION` lists every result key (`ema_9_21`, `bollinger_20_2`, `active_fvg_zones`, `liquidity_sweep_check`, `last_5_closed_candles`, `risk_levels`, ...) and their enum values (`BULLISH_PIN_BAR`, `NEAR_UPPER`, `FRESH`, ...). Renaming a key or enum in `oanda_client.py` requires updating `agent/prompts.py`; a field the tool does not return will be invented by the model.
+- **Trading rules live in two places.** SL = 1.5 x ATR, TP1 = RR 1:1.5, TP2 = RR 1:3 (`SL_ATR_MULT`, `TP1_RR`, `TP2_RR` in `oanda_client.py`, which precomputes `risk_levels` per timeframe so the model does not do arithmetic) and are also stated in the prompt; the prompt uses the M5 `risk_levels`. The spread threshold (0.50), the H1 → M15 → M5 hierarchy and the "no BUY/SELL without an M5 trigger" rule are prompt-only.
 - **Report format is Telegram HTML.** The prompt restricts output to `<b>`/`<i>` and forbids Markdown and stray `<`/`>`. `telegram_bot.py` sends with `parse_mode=HTML` and, on HTTP 400, resends that chunk as plain text with tags stripped. Messages are split at 4000 chars on line boundaries.
 
 ### Indicator rules
@@ -63,8 +63,13 @@ Pure Python in `oanda_client.py` — do not introduce pandas, numpy or ta-lib on
 
 - Indicators use only candles with `complete == True` (no repaint). The bridge marks the last returned bar (MT5 position 0) as incomplete; live bid/ask come from the tick, not from candles.
 - EMA: SMA seed then `k = 2/(period+1)`. RSI and ATR: Wilder smoothing. Verified against the standard Wilder RSI reference series (70.46 → 57.92).
+- Structure detectors (all on complete candles): Bollinger 20/2 with population std-dev; 3-candle FVG over the last 50 bars, ignoring gaps under 0.1 x ATR and dropping zones a later candle has fully traded through (touched = `PARTIAL`); liquidity sweep = one of the last 3 candles wicks past the prior 20-bar extreme and closes back inside; candle patterns are rule-based (pin bar: dominant wick ≥ 2× body and ≥ 60% of range, opposite wick ≤ 25%; engulfing: opposite-direction body fully covering the previous body; doji: body ≤ 10% of range).
 - `CANDLE_COUNT = 220` gives EMA 200 only ~19 bars of warm-up after its seed, so it can differ slightly from charting platforms; raising the count fixes that.
 - MT5 candles are bid-based and timestamps are broker server time (output keys are suffixed `_broker`).
+
+### n8n variant
+
+An n8n workflow ("XAU/USD Top-Down Report (H1-M15-M5)") can replace the cron + `main.py` path. n8n cannot reach MT5, so `tools/market_api.py` (stdlib `http.server`, systemd unit `xauusd-market-api`) serves `GET /snapshot` = H1/M15/M5 from `get_oanda_xauusd_data` plus `get_macro_news`, guarded by the `X-API-Key` header (`MARKET_API_TOKEN`, ≥24 chars; `config.validate_market_api()`). The server is single-threaded on purpose so MT5 is never hit concurrently. In n8n the data is fetched *before* the LLM and pasted into the prompt (no tool calling), so the workflow's system prompt is a copy of `SYSTEM_INSTRUCTION` with the tool-calling steps replaced — prompt edits must be made in both places. Run only one of cron or n8n, or reports are sent twice.
 
 ### News
 
