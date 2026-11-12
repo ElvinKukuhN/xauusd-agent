@@ -1,0 +1,44 @@
+# ============================================================
+# xauusd-agent di Docker: MT5 (Wine) + market API untuk n8n.
+#
+#   docker compose up -d --build
+#   docker compose logs -f
+#
+# n8n (container "n8n" di network "stack_default") memanggil:
+#   http://xauusd-market-api:8787/snapshot   (header X-API-Key: MARKET_API_TOKEN)
+# ============================================================
+services:
+  xauusd-market-api:
+    build: .
+    image: xauusd-agent:latest
+    container_name: xauusd-market-api
+    restart: unless-stopped
+    env_file: .env
+    # Nilai di bawah ini menimpa .env: path dan alamat di dalam container
+    # berbeda dengan instalasi langsung di VPS (setup_vps.sh).
+    environment:
+      WINEPREFIX: /data/wine
+      MT5_PYTHON_CMD: "wine C:/mt5py/python.exe"
+      MT5_DISPLAY: ":99"
+      MARKET_API_HOST: 0.0.0.0
+      MARKET_API_PORT: "8787"
+      # 1 = x11vnc jalan (dibutuhkan untuk login MT5 pertama kali). Boleh 0 setelahnya.
+      ENABLE_VNC: ${ENABLE_VNC:-1}
+    volumes:
+      - mt5-data:/data
+    ports:
+      # Hanya localhost VPS. Akses dari PC lewat SSH tunnel.
+      - "127.0.0.1:5900:5900"   # VNC
+      - "127.0.0.1:8787:8787"   # market API (untuk tes curl dari host)
+    shm_size: 256m
+    networks:
+      - default
+      - n8n
+
+networks:
+  n8n:
+    external: true
+    name: stack_default
+
+volumes:
+  mt5-data:

@@ -71,6 +71,10 @@ Pure Python in `oanda_client.py` — do not introduce pandas, numpy or ta-lib on
 
 An n8n workflow ("XAU/USD Top-Down Report (H1-M15-M5)") can replace the cron + `main.py` path. n8n cannot reach MT5, so `tools/market_api.py` (stdlib `http.server`, systemd unit `xauusd-market-api`) serves `GET /snapshot` = H1/M15/M5 from `get_oanda_xauusd_data` plus `get_macro_news`, guarded by the `X-API-Key` header (`MARKET_API_TOKEN`, ≥24 chars; `config.validate_market_api()`). The server is single-threaded on purpose so MT5 is never hit concurrently. In n8n the data is fetched *before* the LLM and pasted into the prompt (no tool calling), so the workflow's system prompt is a copy of `SYSTEM_INSTRUCTION` with the tool-calling steps replaced — prompt edits must be made in both places. Run only one of cron or n8n, or reports are sent twice.
 
+### Docker variant
+
+`Dockerfile` + `docker-compose.yml` + `docker/entrypoint.sh` run MT5 and `market_api.py` in one container (`xauusd-market-api`); the bot spawns the bridge via Wine, so MT5 and the Python side cannot be split into separate containers. The entrypoint repeats `setup_vps.sh`'s install steps (Wine prefix, MT5, embeddable Python + `MetaTrader5`) on first start into the `/data` volume, so the MT5 login survives rebuilds — keep the two install paths in sync. Compose `environment` overrides `.env` for `WINEPREFIX`, `MT5_PYTHON_CMD`, `MT5_DISPLAY`, `MARKET_API_HOST/PORT` (an empty `WINEPREFIX=` from `env_file` would otherwise beat the image `ENV`). It joins the external network `stack_default` so n8n reaches `http://xauusd-market-api:8787`; VNC and the API are published on `127.0.0.1` only. Steps in `DOCKER.md`.
+
 ### News
 
 `get_macro_news` takes items round-robin across the RSS feeds in `RSS_FEEDS` (newest first within each), then sorts the selected 8 by date. A plain "latest 8 overall" lets the busiest feed fill every slot.
